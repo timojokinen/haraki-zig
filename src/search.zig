@@ -1,100 +1,96 @@
 const std = @import("std");
 const Position = @import("position.zig").Position;
 const Move = @import("move.zig").Move;
+const MoveList = @import("move.zig").MoveList;
+const ScoredMove = @import("move.zig").ScoredMove;
 const eval = @import("eval.zig").eval;
 const Color = @import("utils.zig").Color;
+const scoreMoves = @import("movepick.zig").scoreMoves;
 
 const INF: i32 = 32_000;
+const MATE: i32 = 30_000;
 
-pub fn search(position: *Position, depth: usize) !Move {
-    var move_list: [256]Move = undefined;
-    const move_count = try position.generateMoves(&move_list);
-    
-    var best_move: Move = move_list[0];
-    var best_score: i32 = -INF;
+pub const Searcher = struct {
+    best_move: ?Move = null,
+    best_score: i32 = -INF,
 
-    for (0..move_count) |idx| {
-        const move = move_list[idx];
-        try position.makeMove(move);
-        const score = -(try negamax(position, -INF, INF, depth - 1));
-        try position.unmakeMove(move);
-        if (score > best_score) {
-            best_score = score;
-            best_move = move;
+    pub fn think(self: *Searcher, position: *Position, max_depth: usize) !Move {
+        if (max_depth == 0) return error.InvalidDepth;
+        var d: usize = 1;
+
+        while (d <= max_depth) : (d += 1) {
+            self.best_score = try negamax(self, position, -INF, INF, d, 0);
         }
+
+        return self.best_move.?;
     }
-    return best_move;
-}
 
-fn negamax(position: *Position, alpha: i32, beta: i32, depth: usize) !i32 {
-    if (depth == 0) return eval(position);
-    var move_list: [256]Move = undefined;
-    const move_count = try position.generateMoves(&move_list);
+    pub fn negamax(self: *Searcher, position: *Position, alpha: i32, beta: i32, depth: usize, ply: usize) !i32 {
+        if (depth == 0) return quiescenceSearch(self, position, alpha, beta, ply);
+        var move_list = try position.generateMoves();
+        scoreMoves(self, position, &move_list);
 
-    // TODO: Handle stalemate (should be 0, not -INF)
-    if (move_count == 0) return -INF;
-    
-    var max: i32 = -INF;
-    var a = alpha;
+        if (move_list.count == 0) {
+            if (!position.inCheck()) return 0; // Stalemate
+            return -MATE + @as(i32, @intCast(ply));
+        }
 
-    for (move_list[0..move_count]) |move| {
-        try position.makeMove(move);
-        const score = -(try negamax(position, -beta, -a, depth - 1));
-        try position.unmakeMove(move);
+        var max: i32 = -INF;
+        var a = alpha;
 
-        if (score > max) {
-            max = score;
-            if (score > a) {
-                a = score;
+        var i: usize = 0;
+        while (i < move_list.count) : (i += 1) {
+            const sm = move_list.pickNext(i);
+            try position.makeMove(sm.move);
+            const score = -(try negamax(self, position, -beta, -a, depth - 1, ply + 1));
+            try position.unmakeMove(sm.move);
+
+            if (score > max) {
+                max = score;
+                if (ply == 0) self.best_move = sm.move;
+                if (score > a) {
+                    a = score;
+                }
             }
+
+            if (score >= beta) return max;
         }
 
-        if (score >= beta) {
-            return max;
+        return max;
+    }
+
+    fn quiescenceSearch(self: *Searcher, position: *Position, alpha_: i32, beta: i32, ply: usize) !i32 {
+        const static_eval = eval(position);
+        if (static_eval >= beta) return static_eval;
+        var alpha: i32 = if (static_eval > alpha_) static_eval else alpha_;
+
+        var move_list = try position.generateMoves();
+        filterCaptures(&move_list);
+        scoreMoves(self, position, &move_list);
+
+        var max = static_eval;
+        var i: usize = 0;
+        while (i < move_list.count) : (i += 1) {
+            const sm = move_list.pickNext(i);
+            try position.makeMove(sm.move);
+            const score = -(try quiescenceSearch(self, position, -beta, -alpha, ply + 1));
+            try position.unmakeMove(sm.move);
+            if (score >= beta) return score;
+            if (score > max) max = score;
+            if (score > alpha) alpha = score;
         }
+        return max;
     }
+};
 
-    return max;
-}
-
-fn quiescenceSearch(position: *Position, alpha_: i32, beta: i32) !i32 {
-    const static_eval: i32 = eval(position);
-    var alpha: i32 = alpha_;
-
-    var move_list: [256]Move = undefined;
-    const move_count = try position.generateMoves(&move_list);
-    const qmove_count = filterCaptures(move_list[0..move_count]);
-
-    var max: i32 = static_eval;
-    if (max >= beta) return max;
-    if (max > alpha) alpha = max;
-
-
-    for (move_list[0..qmove_count]) |move| {
-        try position.makeMove(move);
-        const score = -quiescenceSearch(position, -beta, -alpha);
-        try position.unmakeMove(move);
-
-        if (score >= beta) return score;
-        if (score > max) max = score;
-        if (score > alpha) alpha = score;
-    }
-
-    // TODO: maybe don't stop if king is in check
-
-    return max;
-
-}
-
-fn filterCaptures(moves: []Move) usize {
+fn filterCaptures(move_list: *MoveList) void {
     var w: usize = 0;
-    for (moves) |move| {
-        const is_capture = move.flags & 0b0100 != 0;
-        const is_promotion = move.flags & 0b1000 != 0;
-        if (is_capture or is_promotion) {
-            moves[w] = move;
+    for (move_list.moves[0..move_list.count]) |m| {
+        const flags = @intFromEnum(m.move.flags);
+        if ((flags & 0b1100) != 0) { // capture or promotion bit
+            move_list.moves[w] = m;
             w += 1;
         }
     }
-    return w;
+    move_list.count = w;
 }

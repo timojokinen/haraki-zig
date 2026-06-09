@@ -5,16 +5,15 @@ const createPositionFromFEN = @import("position.zig").createPositionFromFEN;
 const utils = @import("utils.zig");
 
 pub fn perft(position: *Position, depth: usize) !usize {
-    var move_list_buf: [256]Move = undefined;
-    const move_count = try position.generateMoves(&move_list_buf);
+    const move_list = try position.generateMoves();
 
     var total: usize = 0;
-    for (move_list_buf[0..move_count]) |move| {
-        try position.makeMove(move);
+    for (move_list.moves[0..move_list.count]) |m| {
+        try position.makeMove(m.move);
         const nodes = try perftInner(position, depth - 1);
-        try position.unmakeMove(move);
+        try position.unmakeMove(m.move);
 
-        std.debug.print("{s}{s}: {d}\n", .{ utils.idx2san(move.from_sq), utils.idx2san(move.to_sq), nodes });
+        std.debug.print("{s}{s}: {d}\n", .{ utils.idx2san(m.move.from_sq), utils.idx2san(m.move.to_sq), nodes });
         total += nodes;
     }
 
@@ -23,16 +22,15 @@ pub fn perft(position: *Position, depth: usize) !usize {
 }
 
 fn perftInner(position: *Position, depth: usize) !usize {
-    var move_list_buf: [256]Move = undefined;
-    const move_count = try position.generateMoves(&move_list_buf);
+    const move_list = try position.generateMoves();
 
-    if (depth == 1) return move_count;
+    if (depth == 1) return move_list.count;
     if (depth == 0) return 1;
     var nodes: usize = 0;
-    for (move_list_buf[0..move_count]) |move| {
-        try position.makeMove(move);
+    for (move_list.moves[0..move_list.count]) |m| {
+        try position.makeMove(m.move);
         nodes += try perftInner(position, depth - 1);
-        try position.unmakeMove(move);
+        try position.unmakeMove(m.move);
     }
 
     return nodes;

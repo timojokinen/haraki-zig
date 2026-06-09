@@ -1,6 +1,6 @@
 const std = @import("std");
 const utils = @import("utils.zig");
-const search_mod = @import("search.zig");
+const Searcher = @import("search.zig").Searcher;
 const Position = @import("position.zig").Position;
 const createPositionFromFEN = @import("position.zig").createPositionFromFEN;
 const perft = @import("perft.zig").perft;
@@ -47,12 +47,11 @@ fn applyUciMove(position: *Position, move_str: []const u8) !void {
     const from_sq = try utils.san2idx(move_str[0..2]);
     const to_sq = try utils.san2idx(move_str[2..4]);
     const promo_char: u8 = if (move_str.len >= 5) move_str[4] else 0;
-    var move_list: [256]Move = undefined;
-    const move_count = try position.generateMoves(&move_list);
-    for (move_list[0..move_count]) |move| {
-        if (move.from_sq != from_sq or move.to_sq != to_sq) continue;
+    const move_list = try position.generateMoves();
+    for (move_list.moves[0..move_list.count]) |m| {
+        if (m.move.from_sq != from_sq or m.move.to_sq != to_sq) continue;
         if (promo_char != 0) {
-            const is_match = switch (move.flags) {
+            const is_match = switch (m.move.flags) {
                 .QUEEN_PROMOTION, .QUEEN_PROMOTION_CAPTURE => promo_char == 'q',
                 .ROOK_PROMOTION, .ROOK_PROMOTION_CAPTURE => promo_char == 'r',
                 .BISHOP_PROMOTION, .BISHOP_PROMOTION_CAPTURE => promo_char == 'b',
@@ -61,7 +60,7 @@ fn applyUciMove(position: *Position, move_str: []const u8) !void {
             };
             if (!is_match) continue;
         }
-        try position.makeMove(move);
+        try position.makeMove(m.move);
         return;
     }
     return error.MoveNotFound;
@@ -79,6 +78,8 @@ pub fn uciInterface(io: std.Io) !void {
     const startpos_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
     var position: Position = try createPositionFromFEN(startpos_fen);
 
+    var searcher: Searcher = .{};
+
     while (true) {
         defer stdout.flush() catch {};
 
@@ -93,7 +94,7 @@ pub fn uciInterface(io: std.Io) !void {
         switch (cmd) {
             .quit => break,
             .uci => {
-                try stdout.writeAll("id name Vanta 0.1\n");
+                try stdout.writeAll("id name Vanta\n");
                 try stdout.writeAll("id author Timo Jokinen\n");
                 try stdout.writeAll("uciok\n");
             },
@@ -154,7 +155,7 @@ pub fn uciInterface(io: std.Io) !void {
                 if (perft_depth) |pd| {
                     _ = try perft(&position, pd);
                 } else {
-                    const best_move = try search_mod.search(&position, depth);
+                    const best_move = try searcher.think(&position, depth);
                     var move_buf: [5]u8 = undefined;
                     const move_str = moveToUci(best_move, &move_buf);
                     var out_buf: [20]u8 = undefined;

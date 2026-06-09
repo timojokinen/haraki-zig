@@ -4,6 +4,7 @@ const tables = @import("tables.zig");
 const attacks = @import("attacks.zig");
 const BoardState = @import("fen.zig").BoardState;
 const Move = @import("move.zig").Move;
+const MoveList = @import("move.zig").MoveList;
 const MoveFlags = @import("move.zig").MoveFlags;
 const parseFen = @import("fen.zig").parseFen;
 const Piece = @import("piece.zig").Piece;
@@ -185,11 +186,26 @@ pub const Position = struct {
     }
 
     pub fn pieceAt(self: Position, sq: u6) ?PieceType {
-        const piece_bb = @as(u64, 1) << sq;
-        return if ((self.bbs[@intFromEnum(PieceType.Pawn)] | self.bbs[@intFromEnum(PieceType.Pawn) + 6]) & piece_bb != 0) PieceType.Pawn else if ((self.bbs[@intFromEnum(PieceType.Knight)] | self.bbs[@intFromEnum(PieceType.Knight) + 6]) & piece_bb != 0) PieceType.Knight else if ((self.bbs[@intFromEnum(PieceType.Bishop)] | self.bbs[@intFromEnum(PieceType.Bishop) + 6]) & piece_bb != 0) PieceType.Bishop else if ((self.bbs[@intFromEnum(PieceType.Rook)] | self.bbs[@intFromEnum(PieceType.Rook) + 6]) & piece_bb != 0) PieceType.Rook else if ((self.bbs[@intFromEnum(PieceType.Queen)] | self.bbs[@intFromEnum(PieceType.Queen) + 6]) & piece_bb != 0) PieceType.Queen else if ((self.bbs[@intFromEnum(PieceType.King)] | self.bbs[@intFromEnum(PieceType.King) + 6]) & piece_bb != 0) PieceType.King else null;
+        const bit = @as(u64, 1) << sq;
+        inline for ([_]PieceType{ .Pawn, .Knight, .Bishop, .Rook, .Queen, .King }) |pt| {
+            const idx = @intFromEnum(pt);
+            const combined = self.bbs[idx] | self.bbs[idx + 6];
+            if ((combined & bit) != 0) return pt;
+        }
+        return null;
     }
 
-    pub fn generateMoves(self: Position, move_list_buf: *[256]Move) !usize {
+    pub fn inCheck(self: Position) bool {
+        const ally_color: Color = self.board_state.side_to_move;
+        const color_offset: usize = if (ally_color == Color.Black) 6 else 0;
+        const all_pieces_bb: Bitboard = utils.combineBitboards(&self.bbs);
+        const king_bb: Bitboard = self.bbs[@intFromEnum(PieceType.King) + color_offset];
+        const king_sq: u6 = @intCast(@ctz(king_bb));
+        const king_attackers: Bitboard = attacks.squareAttackers(king_sq, ally_color.opp(), self.bbs, all_pieces_bb);
+        return king_attackers > 0;
+    }
+
+    pub fn generateMoves(self: Position) !MoveList {
         const ally_color: Color = self.board_state.side_to_move;
         const color_offset: usize = if (ally_color == Color.Black) 6 else 0;
         const opp_color_offset: usize = if (ally_color == Color.Black) 0 else 6;
@@ -202,7 +218,7 @@ pub const Position = struct {
         const king_attackers: Bitboard = attacks.squareAttackers(king_sq, ally_color.opp(), self.bbs, all_pieces_bb);
         const checkers_count = @popCount(king_attackers);
 
-        var move_list: std.ArrayListUnmanaged(Move) = .initBuffer(move_list_buf);
+        var move_list: MoveList = .{};
 
         {
             const att: Bitboard = tables.lookupKingAttacks(king_sq) & ~ally_pieces_bb & ~opp_attacks;
@@ -212,12 +228,12 @@ pub const Position = struct {
 
             while (quiet != 0) : (quiet &= quiet - 1) {
                 const to_sq: u6 = @intCast(@ctz(quiet));
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.QUIET, .from_sq = king_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.QUIET, .from_sq = king_sq, .to_sq = to_sq });
             }
 
             while (capture != 0) : (capture &= capture - 1) {
                 const to_sq: u6 = @intCast(@ctz(capture));
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.CAPTURE, .from_sq = king_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.CAPTURE, .from_sq = king_sq, .to_sq = to_sq });
             }
 
             const wk_attacked = 0b111 << 4;
@@ -234,7 +250,7 @@ pub const Position = struct {
                 wk_attacked & opp_attacks == 0 and
                 wk_blocked & all_pieces_bb == 0)
             {
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.KING_CASTLE, .from_sq = king_sq, .to_sq = 6 });
+                move_list.add(.{ .flags = MoveFlags.KING_CASTLE, .from_sq = king_sq, .to_sq = 6 });
             }
 
             if (ally_color == Color.White and
@@ -242,7 +258,7 @@ pub const Position = struct {
                 wq_attacked & opp_attacks == 0 and
                 wq_blocked & all_pieces_bb == 0)
             {
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.QUEEN_CASTLE, .from_sq = king_sq, .to_sq = 2 });
+                move_list.add(.{ .flags = MoveFlags.QUEEN_CASTLE, .from_sq = king_sq, .to_sq = 2 });
             }
 
             if (ally_color == Color.Black and
@@ -250,7 +266,7 @@ pub const Position = struct {
                 bk_attacked & opp_attacks == 0 and
                 bk_blocked & all_pieces_bb == 0)
             {
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.KING_CASTLE, .from_sq = king_sq, .to_sq = 62 });
+                move_list.add(.{ .flags = MoveFlags.KING_CASTLE, .from_sq = king_sq, .to_sq = 62 });
             }
 
             if (ally_color == Color.Black and
@@ -258,11 +274,11 @@ pub const Position = struct {
                 bq_attacked & opp_attacks == 0 and
                 bq_blocked & all_pieces_bb == 0)
             {
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.QUEEN_CASTLE, .from_sq = king_sq, .to_sq = 58 });
+                move_list.add(.{ .flags = MoveFlags.QUEEN_CASTLE, .from_sq = king_sq, .to_sq = 58 });
             }
         }
 
-        if (checkers_count >= 2) return move_list.items.len;
+        if (checkers_count >= 2) return move_list;
 
         const rook_queen_pinners = attacks.xRayRookAttacks(@intCast(@ctz(king_bb)), all_pieces_bb, ally_pieces_bb) & (self.bbs[@intFromEnum(PieceType.Queen) + opp_color_offset] | self.bbs[@intFromEnum(PieceType.Rook) + opp_color_offset]);
         const bishop_queen_pinners = attacks.xRayBishopAttacks(@intCast(@ctz(king_bb)), all_pieces_bb, ally_pieces_bb) & (self.bbs[@intFromEnum(PieceType.Queen) + opp_color_offset] | self.bbs[@intFromEnum(PieceType.Bishop) + opp_color_offset]);
@@ -310,19 +326,19 @@ pub const Position = struct {
 
             if (to_bb & ~all_pieces_bb & pin_mask & check_mask != 0) {
                 if (to_bb & promotion_rank != 0) {
-                    move_list.appendAssumeCapacity(.{ .flags = MoveFlags.KNIGHT_PROMOTION, .to_sq = to_sq, .from_sq = from_sq });
-                    move_list.appendAssumeCapacity(.{ .flags = MoveFlags.BISHOP_PROMOTION, .to_sq = to_sq, .from_sq = from_sq });
-                    move_list.appendAssumeCapacity(.{ .flags = MoveFlags.ROOK_PROMOTION, .to_sq = to_sq, .from_sq = from_sq });
-                    move_list.appendAssumeCapacity(.{ .flags = MoveFlags.QUEEN_PROMOTION, .to_sq = to_sq, .from_sq = from_sq });
+                    move_list.add(.{ .flags = MoveFlags.KNIGHT_PROMOTION, .to_sq = to_sq, .from_sq = from_sq });
+                    move_list.add(.{ .flags = MoveFlags.BISHOP_PROMOTION, .to_sq = to_sq, .from_sq = from_sq });
+                    move_list.add(.{ .flags = MoveFlags.ROOK_PROMOTION, .to_sq = to_sq, .from_sq = from_sq });
+                    move_list.add(.{ .flags = MoveFlags.QUEEN_PROMOTION, .to_sq = to_sq, .from_sq = from_sq });
                 } else {
-                    move_list.appendAssumeCapacity(.{ .flags = MoveFlags.QUIET, .to_sq = to_sq, .from_sq = from_sq });
+                    move_list.add(.{ .flags = MoveFlags.QUIET, .to_sq = to_sq, .from_sq = from_sq });
                 }
             }
 
             if (to_bb & ~all_pieces_bb & ~promotion_rank != 0) {
                 to_sq = @intCast(@as(i8, to_sq) + 8 * pawn_direction);
                 if (@as(u64, 1) << to_sq & ~all_pieces_bb & pin_mask & check_mask != 0 and from_bb & utils.relativeRank(1, ally_color) != 0) {
-                    move_list.appendAssumeCapacity(.{ .flags = MoveFlags.DOUBLE_PAWN_PUSH, .from_sq = from_sq, .to_sq = to_sq });
+                    move_list.add(.{ .flags = MoveFlags.DOUBLE_PAWN_PUSH, .from_sq = from_sq, .to_sq = to_sq });
                 }
             }
 
@@ -332,14 +348,14 @@ pub const Position = struct {
             var prom_captures: Bitboard = att & promotion_rank;
 
             while (captures != 0) : (captures &= captures - 1) {
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.CAPTURE, .from_sq = from_sq, .to_sq = @intCast(@ctz(captures)) });
+                move_list.add(.{ .flags = MoveFlags.CAPTURE, .from_sq = from_sq, .to_sq = @intCast(@ctz(captures)) });
             }
             while (prom_captures != 0) : (prom_captures &= prom_captures - 1) {
                 to_sq = @intCast(@ctz(prom_captures));
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.KNIGHT_PROMOTION_CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.BISHOP_PROMOTION_CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.ROOK_PROMOTION_CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.QUEEN_PROMOTION_CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.KNIGHT_PROMOTION_CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.BISHOP_PROMOTION_CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.ROOK_PROMOTION_CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.QUEEN_PROMOTION_CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
             }
 
             if (self.board_state.en_passant_square) |ep_sq| {
@@ -351,7 +367,7 @@ pub const Position = struct {
                     const opp_rook_queen = (self.bbs[@intFromEnum(PieceType.Rook) + opp_color_offset] | self.bbs[@intFromEnum(PieceType.Queen) + opp_color_offset]);
                     const exposes_check = tables.lookupRookAttacks(king_sq, occ_after) & opp_rook_queen != 0;
                     if (exposes_check == false) {
-                        move_list.appendAssumeCapacity(.{ .flags = MoveFlags.EP_CAPTURE, .from_sq = from_sq, .to_sq = ep_sq });
+                        move_list.add(.{ .flags = MoveFlags.EP_CAPTURE, .from_sq = from_sq, .to_sq = ep_sq });
                     }
                 }
             }
@@ -367,12 +383,12 @@ pub const Position = struct {
 
             while (quiet != 0) : (quiet &= quiet - 1) {
                 const to_sq: u6 = @intCast(@ctz(quiet));
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.QUIET, .from_sq = from_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.QUIET, .from_sq = from_sq, .to_sq = to_sq });
             }
 
             while (capture != 0) : (capture &= capture - 1) {
                 const to_sq: u6 = @intCast(@ctz(capture));
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
             }
         }
 
@@ -391,12 +407,12 @@ pub const Position = struct {
 
             while (quiet != 0) : (quiet &= quiet - 1) {
                 const to_sq: u6 = @intCast(@ctz(quiet));
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.QUIET, .from_sq = from_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.QUIET, .from_sq = from_sq, .to_sq = to_sq });
             }
 
             while (capture != 0) : (capture &= capture - 1) {
                 const to_sq: u6 = @intCast(@ctz(capture));
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
             }
         }
 
@@ -425,12 +441,12 @@ pub const Position = struct {
 
             while (quiet != 0) : (quiet &= quiet - 1) {
                 const to_sq: u6 = @intCast(@ctz(quiet));
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.QUIET, .from_sq = from_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.QUIET, .from_sq = from_sq, .to_sq = to_sq });
             }
 
             while (capture != 0) : (capture &= capture - 1) {
                 const to_sq: u6 = @intCast(@ctz(capture));
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
             }
         }
 
@@ -460,15 +476,15 @@ pub const Position = struct {
 
             while (quiet != 0) : (quiet &= quiet - 1) {
                 const to_sq: u6 = @intCast(@ctz(quiet));
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.QUIET, .from_sq = from_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.QUIET, .from_sq = from_sq, .to_sq = to_sq });
             }
 
             while (capture != 0) : (capture &= capture - 1) {
                 const to_sq: u6 = @intCast(@ctz(capture));
-                move_list.appendAssumeCapacity(.{ .flags = MoveFlags.CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
+                move_list.add(.{ .flags = MoveFlags.CAPTURE, .from_sq = from_sq, .to_sq = to_sq });
             }
         }
 
-        return move_list.items.len;
+        return move_list;
     }
 };
